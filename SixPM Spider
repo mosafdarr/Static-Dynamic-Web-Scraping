@@ -1,0 +1,138 @@
+from scrapy.linkextractors import LinkExtractor
+from scrapy.spiders import CrawlSpider, Request, Rule, Spider
+
+from staticsite.items import SixpmItems
+
+
+class SixpmParser(Spider):
+    name = "sixpm-parser"
+
+    def start_requests(self):
+        product_url = getattr(self, 'product_url', None)
+        yield Request(url=product_url, callback=self.parse)
+
+    def parse(self, response):
+        garment = SixpmItems()
+
+        garment["brand"] = self.product_brand(response)
+        garment["name"] = self.product_name(response)
+        garment["gender"] = self.product_gender(response)
+        garment["care"] = self.product_care(response)
+        garment["retailer_sku"] = self.product_sku(response)
+        garment["url"] = self.product_link(response)
+
+        garment["trail"] = self.product_trail(response)
+        garment["description"] = self.product_description(response)
+        garment["category"] = self.product_category(response)
+        garment["images_urls"] = self.image_urls(response)
+
+        garment["skus"] = self.product_skus(response) 
+  
+        yield garment
+    
+    def product_link(self, response):
+        return response.url
+
+    def product_skus(self, response):
+        skus = {}
+        color = self.color(response)
+        sizes = self.sizes(response)
+        availability = self.availability(response)
+        price, prev_price, currency = self.money_strs(response)
+        product_variants = {"color": color, "price": price,
+                   "currency": currency, "previous_prices": prev_price}
+
+        for product in zip(sizes, availability):
+            size, status = product
+            key = f"{size}_{color}"
+            price, prev_price, currency = self.money_strs(response)
+            skus[key] = {"size": size, "out of stock": "out of stock" in status.lower()}
+
+        skus = {key: {**product_variants, **value} for key, value in skus.items()}
+        
+        return  skus
+
+    def availability(self, response):
+        availability = response.css("input::attr(aria-label)").getall()
+        availability = [val for val in availability[:-1]]
+
+        return availability
+    
+    def product_brand(self, response):
+        return response.css("[itemprop|=brand] ::text").get()
+
+    def product_sku(self, response):
+        return response.css("[itemprop|=sku]::text").get()
+    
+    def product_name(self, response):
+        return response.css("[itemprop|=name]::text").get()
+    
+    def product_description(self, response):
+        description_css = "[itemprop|=description] li::text"
+        product = response.css(description_css)[:7].getall()
+        description = [product[0], self.product_sku(response), " ".join(product[2:])]
+
+        return description
+
+    def product_care(self, response):
+        care_css = "[itemprop|=description] li::text"
+        return response.css(care_css)[2].get()
+
+    def product_category(self, response):
+        return response.css("#breadcrumbs a::text")[-1].getall()
+    
+    def money_strs(self, response):
+        currency_css = "[itemprop='priceCurrency']::attr(content)"
+        price = response.css("[itemprop='offers'] ::attr(content)").get()
+        currency = response.css(currency_css).get()
+        prev_price = response.css("[itemprop='offers'] ::text")[-1].getall()
+
+        return (price, prev_price, currency)
+
+    def color(self, response): 
+        color_css = "[name|=colorSelect]::attr(data-color-name)"
+        return response.css(color_css).get()
+    
+    def sizes(self, response):
+        size_css = "[data-track-label|=size]::attr(data-label)"
+        return response.css(size_css).getall()
+    
+    def image_urls(self, response):
+        images_css = "#stage div > button img::attr(src)"
+        image_urls = response.css(images_css).getall()
+        color = self.color(response)
+
+        return {color: image_urls}
+
+    def product_gender(self, response):
+        gender = response.css("#sizingChooser ::text").get()
+        gender = gender.split(" ")[0]
+
+        return gender.split("'")[0] if "'" in gender else gender
+    
+    def product_trail(self, response):
+        trail = response.meta.get("trail", [])
+        return trail
+
+
+class SixpmCrawler(CrawlSpider):
+    name = "sixpm"
+    allowed_domains = ["6pm.com"]
+    start_urls = ["https://www.6pm.com"]
+    parser = SixpmParser()
+    categories = ["[data-sub-nav|=true]", "[rel|=next]"]
+    products = ["#products"]
+
+    rules = [
+        Rule(LinkExtractor(restrict_css=categories), process_request="meta_trail", follow=True),
+        Rule(LinkExtractor(restrict_css=products), callback=parser.parse, process_request="meta_trail")
+    ]
+
+    def meta_trail(self, request, response):
+        base_url = self.start_urls[0]
+        category = response.css("h1 ::text").get()
+        trail = response.meta.get("trail", [])
+        trail = [["", base_url], [category.strip(), response.url] if category else ["", response.url]]
+        request.meta["trail"] = trail
+
+        return request
