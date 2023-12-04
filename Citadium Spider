@@ -1,0 +1,135 @@
+import re
+
+from scrapy.linkextractors import LinkExtractor
+from scrapy.spiders import CrawlSpider, Request, Rule , Spider
+
+from Citadium.items import CitadiumItem
+
+
+class CitadiumParser(Spider):
+    name = "citadium-parser"
+
+    def start_requests(self):
+        product_url = getattr(self, 'product_url', None)
+        yield Request(url=product_url, callback=self.parse)
+
+    def parse(self, response):
+        garment = CitadiumItem()
+
+        garment["brand"] = self.product_brand(response)
+        garment["name"] = self.product_name(response)
+        garment["gender"] = self.product_gender(response)
+        garment["care"] = self.product_care(response)
+        garment["retailer_sku"] = self.product_sku(response)
+        garment["url"] = self.product_link(response)
+
+        garment["trail"] = self.product_trail(response)
+        garment["description"] = self.product_description(response)
+        garment["category"] = self.product_category(response)
+        garment["images_urls"] = self.image_urls(response)
+
+        garment["skus"] = self.product_skus(response) 
+
+        yield garment
+    
+    def product_trail(self, response):
+        trail = response.meta.get("trail", [])
+        return trail
+    
+    def product_name(self, response):
+        name_css = "div.position-relative h1::text"
+        name = response.css(name_css).getall()
+
+        return name[1].strip()     
+    
+    def product_brand(self, response):
+        brand_css = ".position-relative a p::text"
+        return response.css(brand_css).get().strip()
+    
+    def product_color(self, response):
+        color_script = response.css("script:contains('currencyCode')").get()
+        return re.findall(r'"variant":"([^"]+)"', color_script)[0]
+    
+    def product_sku(self, response):
+        return response.css("#produit_id ::attr(value)").get()
+    
+    def product_gender(self, response):
+        gender_script = response.css("script:contains('pageId')").get()
+        return re.findall(r'"univers":"([^"]+)"', gender_script)[0]
+
+    def money_strs(self, response):
+        price = response.css(".container-main-info p > ::text").get()
+        currency_script = response.css("script:contains('currencyCode')").get()
+        currency_code = re.findall(r'"currencyCode":"([^"]+)"', currency_script)[0]
+
+        return (price, currency_code)
+    
+    def image_urls(self, response):
+        image_urls_css = ".swiper-container-fiche-produit img::attr(data-src)"
+        return response.css(image_urls_css).getall()
+    
+    def product_category(self, response):
+        category_script = response.css("script:contains('categoryId')").get()
+        category = re.findall(r'"category":"([^"]+)"', category_script)[0]
+
+        return [category]
+    
+    def sizes(self, response):
+        return set(response.css(".guide-univers td::text").getall())
+    
+    def product_description(self, response):
+        description = response.css(".op-text-description ::text").getall()
+        description = [line.strip() for line in description if line.strip().startswith('-')]
+
+        return description
+    
+    def product_care(self, response):
+        return response.css(".container-colors span ::text").get()
+
+    def product_link(self, response):
+        return response.url
+    
+    def product_skus(self, response):
+        skus = {}
+        sizes_script = response.css("script:contains('pageId')").get()
+        variants = re.findall(r'"refId":"([^"]+)",.*?,"size":"([^"]+)"', sizes_script)
+        color = self.product_color(response)
+        price, currency = self.money_strs(response)
+        product = {"Color:": color, "price:": price, "currency:": currency}
+        
+        for refId, size in variants:
+            key = f"{size}_{color}"
+            skus[key] = {"size:": size, "OutofStock:": self.availability(response, refId)}
+            
+        skus = {key: {**value, **product} for key, value in skus.items()}
+        
+        return skus     
+    
+    def availability(self, response, refId):
+        skus_script = response.css("script:contains('availability')").get()
+        availability = re.findall(rf'"availability":"([^"]+)","sku":"{refId}"', skus_script)
+        
+        return "outofstock" in availability[0].lower()
+    
+
+class CitadiumCrawler(CrawlSpider):
+    name = "citadium"
+    allowed_domains = ["citadium.com"]
+    start_urls = ["https://www.citadium.com"]
+    parser = CitadiumParser()
+    categories = ["#navigation", "#navigation .row li", "#view-all-pagination"]
+    products = ["#view-all-items"]
+
+    rules = [
+        Rule(LinkExtractor(restrict_css=categories), process_request="meta_trail", follow=True),
+        Rule(LinkExtractor(restrict_css=products), process_request="meta_trail", callback=parser.parse)
+    ]
+
+    def meta_trail(self, request, response):
+        category = response.css("main h1 ::text").get()
+        base_url = self.start_urls[0]
+        trail = request.meta.get("trail", [])
+        trail = [["", base_url], [category.strip(),response.url] if category else ["", response.url]]
+        request.meta["trail"] = trail
+        
+        return request
